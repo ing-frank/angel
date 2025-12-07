@@ -1,0 +1,404 @@
+<!--
+Archivo: index.html
+Descripción: Sistema completo "FRANK FAST FOOD" (cliente + admin) con conexión a Firebase Realtime Database mediante REST.
+Características:
+- Menú idéntico al código C++ original (editable desde panel admin).
+- Cliente: ver menú, agregar al carrito, calcular subtotal, descuento >=1000 (10%), dividir cuenta y enviar pedido.
+- Pedido se envía a Firebase (POST /orders.json) y queda almacenado con estado "Pendiente".
+- Admin: accesible añadiendo `?admin=frank2025` a la URL. Panel muestra pedidos con polling en tiempo real (cada 2s), permite cambiar estado y eliminar pedidos.
+- Admin puede editar menú (CRUD básico) y los cambios se guardan en Firebase (/menu).
+- QR genera imagen apuntando a la URL actual.
+
+CONFIG: ya he insertado tu Firebase URL. ADMIN_KEY por defecto: frank2025 (puedes cambiarlo en la sección CONFIG abajo).
+
+IMPORTANTE (seguridad): La Realtime DB debe estar en modo de prueba para que lecturas/escrituras desde el navegador funcionen. No uses este modo en producción sin reglas.
+-->
+
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Frank Fast Food - Cliente & Admin</title>
+  <style>
+    :root{--accent:#d62828;--muted:#666;--bg:#fff7f2}
+    body{font-family:Inter,Segoe UI,Arial,Helvetica,sans-serif;margin:0;background:var(--bg);color:#111}
+    .container{max-width:1100px;margin:18px auto;padding:14px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    h1{color:var(--accent);margin:0}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:12px;margin-top:12px}
+    .card{background:white;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+    .menu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+    .item-row{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+    button{background:var(--accent);color:white;border:0;padding:8px 10px;border-radius:8px;cursor:pointer}
+    input[type=text],input[type=tel],input[type=number],select,textarea{padding:8px;border-radius:8px;border:1px solid #ddd;width:100%;box-sizing:border-box}
+    .small{font-size:0.9rem;color:var(--muted)}
+    .hidden{display:none}
+    .qr-box img{width:120px;height:120px}
+    table{width:100%;border-collapse:collapse}
+    table td,table th{border:1px solid #eee;padding:8px;text-align:left}
+    .muted{color:var(--muted)}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#f1f1f1}
+    .ok{background:#2e7d32;color:white}
+    .warn{background:#f59e0b;color:white}
+    .danger{background:#d32f2f;color:white}
+    .admin-actions{display:flex;gap:8px}
+    footer{margin-top:18px;color:var(--muted);font-size:0.9rem}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>FRANK FAST FOOD</h1>
+        <div class="small">Cliente • Pedido en línea • Panel admin integrado</div>
+      </div>
+      <div class="qr-box card" id="qrCard" style="padding:8px;display:flex;flex-direction:column;align-items:center">
+        <div id="qrcode"></div>
+        <small class="small" style="margin-top:6px">Escanea para abrir este menú</small>
+      </div>
+    </header>
+
+    <div id="clientView" class="grid">
+      <main>
+        <div class="card">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="search" placeholder="Buscar producto..." style="flex:1" />
+            <button id="genQRBtn">Regenerar QR</button>
+          </div>
+          <div id="menu" class="menu-grid" style="margin-top:12px"></div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h3 class="small">Detalles del pedido</h3>
+          <div class="small">Instrucciones: agrega productos, escribe nombre y teléfono y confirma.</div>
+        </div>
+      </main>
+
+      <aside>
+        <div class="card">
+          <h3>Carrito</h3>
+          <div id="cartItems">Carrito vacío</div>
+          <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input id="customerName" type="text" placeholder="Nombre del cliente" />
+            <input id="customerPhone" type="tel" placeholder="Teléfono (ej: 8091234567)" />
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+            <input id="splitCount" type="number" min="1" value="1" style="width:120px" />
+            <div class="small">¿Entre cuántas personas se divide la cuenta?</div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <button id="checkoutBtn">Enviar pedido</button>
+            <button id="printBtn" style="background:#ffd166;color:#111">Imprimir</button>
+          </div>
+          <div id="orderStatus" class="small" style="margin-top:8px"></div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Admin panel (visible con ?admin=KEY) -->
+    <div id="adminPanel" class="hidden">
+      <div style="display:flex;gap:12px;margin-top:12px">
+        <div style="flex:1" class="card">
+          <h3>Panel de Pedidos (en tiempo real)</h3>
+          <div id="ordersList">Cargando pedidos...</div>
+        </div>
+        <div style="width:360px" class="card">
+          <h3>Editar Menú</h3>
+          <div id="menuEditor">Cargando menú...</div>
+          <hr />
+          <div>
+            <h4>Añadir producto</h4>
+            <input id="newCat" placeholder="Categoría" />
+            <input id="newName" placeholder="Nombre" style="margin-top:6px" />
+            <input id="newPrice" placeholder="Precio" style="margin-top:6px" />
+            <div style="margin-top:6px"><button id="addItemBtn">Añadir</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>Panel offline / Firebase REST. Asegura tu Realtime DB antes de producción.</footer>
+  </div>
+
+  <script>
+    // ============ CONFIG ============
+    const FIREBASE_DB_URL = https://frank-fast-food-default-rtdb.firebaseio.com; // <- TU URL (sin slash final es aceptable)
+    const ADMIN_KEY = 'frank2025'; // Accede con ?admin=frank2025
+    const POLLING_MS = 2000; // cada 2s se revisan pedidos (simula realtime)
+    // ==================================
+
+    // Menú por defecto (desde tu C++ original)
+    const DEFAULT_MENU = [
+      {id:'c1', categoria:'Combos', nombre:'Combo Hamburguesa + Papas + Refresco', precio:380, active:true},
+      {id:'c2', categoria:'Combos', nombre:'Combo Pollo Frito + Papas + Refresco', precio:420, active:true},
+      {id:'c3', categoria:'Combos', nombre:'Combo Pizza personal + Refresco', precio:390, active:true},
+      {id:'c4', categoria:'Combos', nombre:'Combo Hot Dog + Papas + Refresco', precio:320, active:true},
+      {id:'h1', categoria:'Hamburguesas', nombre:'Hamburguesa Clásica', precio:150, active:true},
+      {id:'h2', categoria:'Hamburguesas', nombre:'Hamburguesa Doble', precio:220, active:true},
+      {id:'h3', categoria:'Hamburguesas', nombre:'Hamburguesa BBQ', precio:200, active:true},
+      {id:'h4', categoria:'Hamburguesas', nombre:'Hamburguesa Mixta', precio:240, active:true},
+      {id:'p1', categoria:'Pollo', nombre:'Pollo Frito (Entero)', precio:350, active:true},
+      {id:'p2', categoria:'Pollo', nombre:'Pollo Frito (Mitad)', precio:200, active:true},
+      {id:'p3', categoria:'Pollo', nombre:'Alitas BBQ (6 piezas)', precio:220, active:true},
+      {id:'p4', categoria:'Pollo', nombre:'Tiras de Pollo (6 piezas)', precio:180, active:true},
+      {id:'a1', categoria:'Arroz', nombre:'Arroz frito grande', precio:400, active:true},
+      {id:'a2', categoria:'Arroz', nombre:'Arroz frito mediano', precio:300, active:true},
+      {id:'a3', categoria:'Arroz', nombre:'Arroz frito pequeño', precio:200, active:true},
+      {id:'ac1', categoria:'Acompañantes', nombre:'Papas fritas grande', precio:150, active:true},
+      {id:'ac2', categoria:'Acompañantes', nombre:'Papas fritas mediana', precio:120, active:true},
+      {id:'ac3', categoria:'Acompañantes', nombre:'Yuca frita', precio:130, active:true},
+      {id:'ac4', categoria:'Acompañantes', nombre:'Tostones', precio:140, active:true},
+      {id:'ac5', categoria:'Acompañantes', nombre:'Ensalada fresca', precio:120, active:true},
+      {id:'pz1', categoria:'Pizzas', nombre:'Pizza personal', precio:350, active:true},
+      {id:'pz2', categoria:'Pizzas', nombre:'Pizza mediana', precio:450, active:true},
+      {id:'pz3', categoria:'Pizzas', nombre:'Pizza familiar', precio:600, active:true},
+      {id:'hd1', categoria:'Hot Dogs', nombre:'Hot Dog clásico', precio:180, active:true},
+      {id:'hd2', categoria:'Hot Dogs', nombre:'Hot Dog con queso', precio:200, active:true},
+      {id:'hd3', categoria:'Hot Dogs', nombre:'Hot Dog especial', precio:220, active:true},
+      {id:'b1', categoria:'Bebidas', nombre:'Agua', precio:50, active:true},
+      {id:'b2', categoria:'Bebidas', nombre:'Refresco lata', precio:100, active:true},
+      {id:'b3', categoria:'Bebidas', nombre:'Jugo natural', precio:120, active:true},
+      {id:'b4', categoria:'Bebidas', nombre:'Cerveza', precio:180, active:true},
+      {id:'b5', categoria:'Bebidas', nombre:'Café', precio:80, active:true},
+      {id:'b6', categoria:'Bebidas', nombre:'Té', precio:70, active:true},
+      {id:'s1', categoria:'Sushi', nombre:'Sushi roll clásico', precio:200, active:true},
+      {id:'s2', categoria:'Sushi', nombre:'Sushi roll especial', precio:260, active:true},
+      {id:'s3', categoria:'Sushi', nombre:'Sushi roll tempura', precio:240, active:true},
+      {id:'d1', categoria:'Postres', nombre:'Helado', precio:120, active:true},
+      {id:'d2', categoria:'Postres', nombre:'Brownie', precio:150, active:true},
+      {id:'d3', categoria:'Postres', nombre:'Cheesecake', precio:180, active:true},
+      {id:'d4', categoria:'Postres', nombre:'Flan', precio:130, active:true}
+    ];
+
+    // Helpers DOM
+    const $ = s => document.querySelector(s);
+
+    // State
+    let MENU = [];
+    let cart = {};
+    let ordersCache = {};
+    let pollingTimer = null;
+
+    // Utility: Firebase REST helpers
+    function url(path){
+      let base = FIREBASE_DB_URL.replace(/\/+$/,'');
+      return base + path + '.json';
+    }
+
+    async function fetchJSON(path){
+      try{
+        const r = await fetch(url(path));
+        if(!r.ok) throw new Error(r.status);
+        return await r.json();
+      }catch(e){ console.warn('fetchJSON',path,e); return null; }
+    }
+
+    async function putJSON(path, data){
+      try{
+        const r = await fetch(url(path), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+        return await r.json();
+      }catch(e){ console.warn('putJSON',e); return null; }
+    }
+
+    async function postJSON(path, data){
+      try{
+        const r = await fetch(url(path), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+        return await r.json();
+      }catch(e){ console.warn('postJSON',e); return null; }
+    }
+
+    async function deleteJSON(path){
+      try{ const r = await fetch(url(path), {method:'DELETE'}); return await r.json(); }catch(e){ console.warn('deleteJSON',e); return null; }
+    }
+
+    // Initialize: load or create menu
+    async function initMenu(){
+      const remote = await fetchJSON('/menu');
+      if(remote){
+        // remote is an object keyed by ids or an array
+        if(Array.isArray(remote)) MENU = remote;
+        else {
+          // convert object to array
+          MENU = Object.keys(remote).map(k=> Object.assign({uid:k}, remote[k]));
+        }
+      } else {
+        // no remote menu -> write default
+        await putJSON('/menu', DEFAULT_MENU);
+        MENU = DEFAULT_MENU.slice();
+      }
+      renderMenu();
+      renderAdminMenuEditor();
+    }
+
+    function renderMenu(filter=''){
+      const container = $('#menu'); container.innerHTML='';
+      const f = filter.trim().toLowerCase();
+      // group by category
+      const groups = {};
+      MENU.filter(it=>it.active!==false).filter(it => it.nombre.toLowerCase().includes(f) || it.categoria.toLowerCase().includes(f)).forEach(item=>{
+        if(!groups[item.categoria]) groups[item.categoria]=[];
+        groups[item.categoria].push(item);
+      });
+      Object.keys(groups).forEach(cat=>{
+        const header = document.createElement('div'); header.style.gridColumn='1/-1'; header.innerHTML = `<div style="font-weight:700;margin-top:8px">${cat}</div>`; container.appendChild(header);
+        groups[cat].forEach(item=>{
+          const el = document.createElement('div'); el.className='card';
+          el.innerHTML = `<h4 style="margin:6px 0">${item.nombre}</h4><div class="item-row"><strong>$${Number(item.precio).toFixed(2)}</strong><div><button data-id="${item.id || item.uid}">Agregar</button></div></div>`;
+          container.appendChild(el);
+        });
+      });
+      document.querySelectorAll('button[data-id]').forEach(b=>b.addEventListener('click', e=> addToCart(e.target.dataset.id)));
+    }
+
+    function addToCart(id){ cart[id] = (cart[id]||0)+1; renderCart(); }
+    function removeFromCart(id){ if(!cart[id]) return; cart[id]--; if(cart[id]<=0) delete cart[id]; renderCart(); }
+
+    function renderCart(){
+      const container = $('#cartItems'); container.innerHTML='';
+      const ids = Object.keys(cart);
+      if(ids.length===0){ container.innerHTML='<div class="small">Carrito vacío</div>'; return }
+      let subtotal=0;
+      ids.forEach(id=>{
+        const item = MENU.find(m=> (m.id===id || m.uid===id));
+        if(!item) return;
+        const qty = cart[id];
+        const lineTotal = item.precio * qty;
+        subtotal += lineTotal;
+        const row = document.createElement('div'); row.style.display='flex'; row.style.justifyContent='space-between'; row.style.marginTop='8px';
+        row.innerHTML = `<div>${item.nombre} x ${qty}</div><div>$${lineTotal.toFixed(2)} <button data-remove="${id}" style="margin-left:8px;padding:4px;border-radius:6px;background:#eee;color:#333;border:0">-</button></div>`;
+        container.appendChild(row);
+      });
+      const descuento = subtotal >= 1000 ? subtotal*0.10 : 0;
+      const total = subtotal - descuento;
+      const dividir = Math.max(1, parseInt($('#splitCount').value || '1'));
+      const porPersona = total / dividir;
+      const summary = document.createElement('div'); summary.style.marginTop='12px';
+      summary.innerHTML = `<strong>Subtotal: $${subtotal.toFixed(2)}</strong><br>Descuento: $${descuento.toFixed(2)}<br><strong>Total: $${total.toFixed(2)}</strong><br>Pago por persona: $${porPersona.toFixed(2)}`;
+      container.appendChild(summary);
+      document.querySelectorAll('button[data-remove]').forEach(b=>b.addEventListener('click', e=> removeFromCart(e.target.dataset.remove)));
+    }
+
+    // QR
+    function generateQR(text, el){ el.innerHTML=''; const size=150; const img=document.createElement('img'); img.alt='QR'; img.width=size; img.height=size; img.src = `https://chart.googleapis.com/chart?cht=qr&chs=${size}x${size}&chl=${encodeURIComponent(text)}`; el.appendChild(img); }
+
+    // Orders: send to Firebase
+    async function sendOrder(){
+      const name = $('#customerName').value.trim(); if(!name){ alert('Ingrese nombre del cliente'); return; }
+      const items = Object.keys(cart).map(id=>{ const m = MENU.find(x=> x.id===id || x.uid===id); return { id: m.id || m.uid, nombre: m.nombre, precio: Number(m.precio), cantidad: cart[id] }; });
+      if(items.length===0){ alert('Carrito vacío'); return; }
+      const subtotal = items.reduce((s,i)=> s + i.precio*i.cantidad, 0);
+      const descuento = subtotal >= 1000 ? subtotal*0.10 : 0;
+      const total = subtotal - descuento;
+      const order = { customerName: name, customerPhone: $('#customerPhone').value.trim() || '---', items, subtotal, descuento, total, state:'Pendiente', ts: Date.now() };
+      const resp = await postJSON('/orders', order);
+      if(resp && resp.name){
+        $('#orderStatus').textContent = 'Pedido enviado. ID: ' + resp.name;
+        // clear cart
+        cart = {}; renderCart();
+      } else {
+        $('#orderStatus').textContent = 'Error al enviar pedido. Intenta de nuevo.';
+      }
+    }
+
+    // Admin: polling orders
+    async function fetchOrdersOnce(){
+      const data = await fetchJSON('/orders');
+      if(!data) return {};
+      return data;
+    }
+
+    async function startOrdersPolling(){
+      if(pollingTimer) clearInterval(pollingTimer);
+      pollingTimer = setInterval(async ()=>{
+        const data = await fetchOrdersOnce();
+        renderOrders(data);
+      }, POLLING_MS);
+      // first immediate
+      const initial = await fetchOrdersOnce(); renderOrders(initial);
+    }
+
+    function renderOrders(data){
+      const list = $('#ordersList'); list.innerHTML='';
+      if(!data || Object.keys(data).length===0){ list.innerHTML = '<div class="small">Sin pedidos</div>'; return; }
+      // sort by ts desc
+      const keys = Object.keys(data).sort((a,b)=> (data[b].ts||0)-(data[a].ts||0));
+      keys.forEach(k=>{
+        const o = data[k];
+        const card = document.createElement('div'); card.style.borderBottom='1px solid #eee'; card.style.padding='8px';
+        const when = o.ts ? new Date(o.ts).toLocaleString() : 'fecha desconocida';
+        const itemsTxt = (o.items||[]).map(it=>`${it.nombre} x${it.cantidad}`).join(', ');
+        card.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><strong>${o.customerName||'---'}</strong><div><span class="pill">${o.state||'Pendiente'}</span></div></div><div class="small">${when}</div><div style="margin-top:8px"><pre style="margin:0">${itemsTxt}</pre></div><div style="margin-top:8px"><strong>Total: $${(o.total||0).toFixed(2)}</strong></div>`;
+        const actions = document.createElement('div'); actions.className='admin-actions'; actions.style.marginTop='8px';
+        const btnPrep = document.createElement('button'); btnPrep.textContent='Preparando'; btnPrep.addEventListener('click', ()=> updateOrderState(k,'Preparando'));
+        const btnReady = document.createElement('button'); btnReady.textContent='Listo'; btnReady.addEventListener('click', ()=> updateOrderState(k,'Listo'));
+        const btnDel = document.createElement('button'); btnDel.textContent='Eliminar'; btnDel.style.background='#777'; btnDel.addEventListener('click', ()=> { if(confirm('Eliminar pedido?')) deleteJSON('/orders/'+k); });
+        actions.appendChild(btnPrep); actions.appendChild(btnReady); actions.appendChild(btnDel);
+        card.appendChild(actions);
+        list.appendChild(card);
+      });
+    }
+
+    async function updateOrderState(key,state){
+      await putJSON('/orders/'+key+'/state', JSON.stringify(state));
+      // simpler: fetch all again
+      const data = await fetchOrdersOnce(); renderOrders(data);
+    }
+
+    // Admin menu editor
+    function renderAdminMenuEditor(){
+      const cont = $('#menuEditor'); cont.innerHTML='';
+      if(!MENU || MENU.length===0){ cont.innerHTML='Sin menú'; return; }
+      MENU.forEach((m,idx)=>{
+        const row = document.createElement('div'); row.style.borderBottom='1px solid #eee'; row.style.padding='6px';
+        row.innerHTML = `<strong>${m.categoria}</strong><div>${m.nombre} - $${Number(m.precio).toFixed(2)}</div>`;
+        const btnEdit = document.createElement('button'); btnEdit.textContent='Editar'; btnEdit.style.marginTop='6px'; btnEdit.addEventListener('click', ()=> editMenuItem(idx));
+        const btnToggle = document.createElement('button'); btnToggle.textContent=m.active? 'Ocultar':'Mostrar'; btnToggle.style.marginLeft='6px'; btnToggle.addEventListener('click', async ()=>{ MENU[idx].active = !MENU[idx].active; await putJSON('/menu', MENU); renderMenu(); renderAdminMenuEditor(); });
+        const btnDel = document.createElement('button'); btnDel.textContent='Borrar'; btnDel.style.marginLeft='6px'; btnDel.addEventListener('click', async ()=>{ if(confirm('Eliminar item?')){ MENU.splice(idx,1); await putJSON('/menu', MENU); renderMenu(); renderAdminMenuEditor(); } });
+        row.appendChild(btnEdit); row.appendChild(btnToggle); row.appendChild(btnDel);
+        cont.appendChild(row);
+      });
+    }
+
+    function editMenuItem(idx){
+      const m = MENU[idx];
+      const name = prompt('Nombre', m.nombre); if(name===null) return; const price = prompt('Precio', m.precio); if(price===null) return; m.nombre = name; m.precio = Number(price); putJSON('/menu', MENU).then(()=>{ renderMenu(); renderAdminMenuEditor(); });
+    }
+
+    // Add new item
+    document.addEventListener('click',(e)=>{
+      if(e.target && e.target.id==='addItemBtn'){
+        const cat = $('#newCat').value.trim(); const name = $('#newName').value.trim(); const price = Number($('#newPrice').value.trim());
+        if(!cat||!name||!price) return alert('Complete campos');
+        const id = 'm' + Date.now(); MENU.push({id, categoria:cat, nombre:name, precio:price, active:true});
+        putJSON('/menu', MENU).then(()=>{ renderMenu(); renderAdminMenuEditor(); $('#newCat').value='';$('#newName').value='';$('#newPrice').value=''; });
+      }
+    });
+
+    // Init app
+    document.addEventListener('DOMContentLoaded', async ()=>{
+      // detect admin
+      const params = new URLSearchParams(location.search); const key = params.get('admin');
+      const isAdmin = key && key === ADMIN_KEY;
+      if(isAdmin){ $('#clientView').classList.add('hidden'); $('#adminPanel').classList.remove('hidden'); }
+
+      generateQR(location.href, $('#qrcode'));
+      $('#genQRBtn').addEventListener('click', ()=> generateQR(location.href, $('#qrcode')));
+
+      // menu initialization
+      await initMenu();
+
+      // render cart
+      renderCart();
+
+      // events
+      $('#search').addEventListener('input', e=> renderMenu(e.target.value));
+      $('#checkoutBtn').addEventListener('click', sendOrder);
+      $('#printBtn').addEventListener('click', ()=> window.print());
+
+      // start polling orders if admin
+      if(isAdmin){ startOrdersPolling(); }
+    });
+  </script>
+</body>
+</html>
